@@ -1,12 +1,8 @@
 import math
-from turtle import pd
 import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 import matplotlib as mpl
-import sys
-# sys.path.append('/home/catheter/Documents/ARCLab-CCCatheter/scripts')
-sys.path.append('/Users/Candice/Documents/UCSD/research/reconstruction/code_py/ARCLab-CCCatheter/scripts')
 # mpl.rcParams['figure.figsize'] = [1280, 800]
 # mpl.rcParams['figure.dpi'] = 300
 
@@ -22,8 +18,6 @@ from skimage.morphology import skeletonize
 from shapely.geometry import Point
 from shapely.geometry.polygon import Polygon
 
-from transform_chong import FindCurvature
-
 import torch
 import shutil
 import os
@@ -33,7 +27,7 @@ import argparse
 
 
 class reconstructCurve():
-    def __init__(self, img_path, curve_length_gt, P0_gt, para_gt, para_init, loss_weight, total_itr, verbose=1):
+    def __init__(self, img_path, curve_length_gt, P0_gt, para_gt, para_init, loss_weight, total_itr, verbose=0):
 
         # self.img_id = 1
         # self.save_dir = './steps_imgs_left_1_STCF'
@@ -79,12 +73,6 @@ class reconstructCurve():
         self.cam_K = self.cam_K / downscale
         self.cam_K[-1, -1] = 1
 
-        # camera projection matrix
-        # used for calculating curvature loss
-        self.camera_matrix = torch.tensor([[883.00220751, 0, -320, 0],
-                        [0, -883.00220751, -240, 0],
-                        [0, 0, -1, 0]])
-
         self.Fourier_order_N = 1
 
         raw_img_rgb = cv2.imread(img_path)
@@ -128,7 +116,6 @@ class reconstructCurve():
         sample_list = torch.linspace(0, 1, self.num_samples)
 
         # Get positions and normals from samples along bezier curve
-
         pos_bezier = torch.zeros(self.num_samples, 3)
         der_bezier = torch.zeros(self.num_samples, 3)
         for i, s in enumerate(sample_list):
@@ -158,8 +145,9 @@ class reconstructCurve():
 
         # pdb.set_trace()
 
-    def getAnyBezierCurve(self, para, P0, num_samples=200):
+    def getAnyBezierCurve(self, para, P0):
 
+        num_samples = 200
         sample_list = torch.linspace(0, 1, num_samples)
 
         P1 = torch.tensor([0.02, 0.002, 0.0])
@@ -170,7 +158,7 @@ class reconstructCurve():
 
         # Get positions and normals from samples along bezier curve
         pos_bezier = torch.zeros(num_samples, 3)
-
+        der_bezier = torch.zeros(num_samples, 3)
         for i, s in enumerate(sample_list):
             pos_bezier[i, :] = (1 - s)**3 * P1 + 3 * s * (1 - s)**2 * \
                 P1p + 3 * (1 - s) * s**2 * P2p + s**3 * P2
@@ -749,7 +737,6 @@ class reconstructCurve():
         skeleton = skeletonize(img_thresh_extend)
 
         self.img_raw_skeleton = np.argwhere(skeleton[:, 0:self.res_width] == 1)
-
 
         # # display results
         # fig, axes = plt.subplots(nrows=1, ncols=2, figsize=(8, 4), sharex=True, sharey=True)
@@ -1431,9 +1418,6 @@ class reconstructCurve():
         return err_segments_sum
 
     def getCenterlineSegmentsObj(self):
-        '''
-        get loss from centerline
-        '''
 
         # centerline = []
         # for i in range(self.proj_bezier_img.shape[0]):
@@ -1490,11 +1474,11 @@ class reconstructCurve():
             index = torch.argmin(err)
             temp = centerline_shift[index, ]
             skeleton_by_corresp.append(temp)
-        self.skeleton_by_corresp = torch.stack(skeleton_by_corresp)
+        skeleton_by_corresp = torch.stack(skeleton_by_corresp)
 
         self.CENTERLINE_SHAPE = centerline.shape[0]
         # err_skeleton_by_corresp = torch.linalg.norm(skeleton - skeleton_by_corresp, ord=None, axis=1) / self.res_width
-        err_skeleton_by_corresp = torch.linalg.norm(skeleton - self.skeleton_by_corresp, ord=None, axis=1) / 1.0
+        err_skeleton_by_corresp = torch.linalg.norm(skeleton - skeleton_by_corresp, ord=None, axis=1) / 1.0
         err_skeleton_sum_by_corresp = torch.sum(err_skeleton_by_corresp) / self.CENTERLINE_SHAPE
         # -------------------------------------------------------------------------------
 
@@ -1542,135 +1526,6 @@ class reconstructCurve():
         # pdb.set_trace()
 
         return obj_J_curveLen
-
-
-    def getCurvatureObj(self):
-        '''
-        return the difference of discrete curvature
-        '''
-        # skeleton_by_corresp from "getCenterlineSegmentsObj" 
-        # The organized skeleton directly obtained from image
-        skeleton = self.skeleton_by_corresp
-        N = len(skeleton)
-
-        # Ground truth centerline of the same size 
-        centerline = self.getAnyBezierCurve(self.para_gt, self.P0_gt, num_samples=N)
-        centerline = torch.flip(centerline, dims=[0])
-
-        # initialize parameter
-        n = 10                      # interval
-        p3d = torch.zeros((3,4))    # store 3d centerline calculated from bezier
-        p2d = torch.zeros((3,3))    # store 2d skeleton obtained from image
-
-        k_init = torch.zeros(N-2)   # store ground truth curvature
-        k = torch.zeros(N-2)        # store curvature from skeleton
-
-        A = torch.tensor([[0, -1, 0], [1, 0, 0], [0, 0, 1]], dtype=torch.float)
-
-        def findN(p1, p2):
-            n = (p1-p2)/torch.linalg.norm(p1-p2)
-            return n
-
-        # loop for curvature change
-        for i in range(N-1-n)[1:]:
-            if (i-n) < 0:
-                p3d[0] = torch.cat((centerline[0], torch.tensor([1])), 0)
-                p2d[0] = torch.cat((skeleton[0], torch.tensor([1])), 0)
-            else:
-                p3d[0] = torch.cat((centerline[i-n], torch.tensor([1])), 0)
-                p2d[0] = torch.cat((skeleton[i-n], torch.tensor([1])), 0)
-
-            p3d[1] = torch.cat((centerline[i], torch.tensor([1])), 0)
-            p2d[1] = torch.cat((skeleton[i], torch.tensor([1])), 0)
-
-            if (i+n) > (N-1):
-                p3d[2] = torch.cat((centerline[N-1], torch.tensor([1])), 0)
-                p2d[2] = torch.cat((skeleton[N-1], torch.tensor([1])), 0)
-            else:
-                p3d[2] = torch.cat((centerline[i+n], torch.tensor([1])), 0)
-                p2d[2] = torch.cat((skeleton[i+n], torch.tensor([1])), 0)
-
-            # find ground truth curvature change k_init
-            P1_h = p3d[0]
-            P2_h = p3d[1]
-            P3_h = p3d[2]
-
-            m3 = self.camera_matrix[2,:]
-
-            z1 = torch.matmul(m3, P1_h)
-            z2 = torch.matmul(m3, P2_h)
-            z3 = torch.matmul(m3, P3_h)
-
-            g1 = z2*torch.matmul(self.camera_matrix, P1_h) - z1*torch.matmul(self.camera_matrix, P2_h)
-            g2 = z3*torch.matmul(self.camera_matrix, P2_h) - z2*torch.matmul(self.camera_matrix, P3_h)
-            g3 = z3*torch.matmul(self.camera_matrix, P1_h) - z1*torch.matmul(self.camera_matrix, P3_h)
-
-            p1_h = torch.matmul(self.camera_matrix, P1_h)/z1
-            p2_h = torch.matmul(self.camera_matrix, P2_h)/z2
-            p3_h = torch.matmul(self.camera_matrix, P3_h)/z3
-
-            # n1 = findN(p1_h, p2_h)
-            # n2 = findN(p2_h, p3_h)
-            # n3 = findN(p1_h, p3_h)
-
-            n1 = (p1_h-p2_h)/torch.linalg.norm(p1_h-p2_h)
-            n2 = (p2_h-p3_h)/torch.linalg.norm(p2_h-p3_h)
-            n3 = (p1_h-p3_h)/torch.linalg.norm(p1_h-p3_h)
-
-            k_init[i] = (2*z2*z3*torch.matmul(g3, torch.matmul(A, g1)))/(torch.matmul(n1,g1)*torch.matmul(n2,g2)*torch.matmul(n3,g3))
-
-            # print(z2*z3)
-            # print(torch.matmul(g3, torch.matmul(A,g1)))
-            # print(torch.matmul(n1,g1)*torch.matmul(n2,g2)*torch.matmul(n3,g3))
-            # print(k_init[i])
-
-            # find curvature change on projected image
-            d1 = torch.linalg.norm(p2d[0]-p2d[1])
-            d2 = torch.linalg.norm(p2d[1]-p2d[2])
-            d3 = torch.linalg.norm(p2d[0]-p2d[2])
-
-            s = 0.5 * torch.matmul((p2d[0]-p2d[2]), torch.matmul(A, (p2d[0]-p2d[1])))
-
-            k[i] = 4 * s / (d1 * d2 * d3)
-
-            # if torch.isnan(k[i]):
-            #     k[i] = 0
-
-            # print(k[i])
-
-        # # plot curvature change 
-        # x = np.linspace(0, N-22, N-22)
-        # k_init_plot = k_init.detach().numpy()
-        # k_plot = k.detach().numpy()
-
-        # # plot of ground truth curvature
-        # plt.plot(x, k_init_plot[10:-10])
-        # plt.xlabel('x')
-        # plt.ylabel('k')
-        # plt.title('curvature from method 1')
-        # plt.show()
-
-        # # plot of skeleton curvature
-        # plt.figure()
-        # plt.plot(x, k_plot[10:-10])
-        # plt.xlabel('x')
-        # plt.ylabel('k')
-        # plt.title('curvature from least square')
-        # plt.show()
-
-        for i in range(N-2):
-            torch.nan_to_num(k[i], nan=1e-5)
-            torch.nan_to_num(k_init[i], nan=1e-5)
-
-        # print(k_init)
-        # print(k)
-
-        # calculate the loss between the two curvature
-        diff_k = torch.subtract(k[10:-10], k_init[10:-10])
-        # print(diff_k)
-        obj_J_k = torch.sum(diff_k)
-
-        return obj_J_k
 
     def getContourMoment(self, contour, x_i, y_j):
 
@@ -2762,13 +2617,9 @@ class reconstructCurve():
         # obj_J = self.AAA
 
         # obj_J = obj_J_fourier + obj_J_curveLength + obj_J_contour
-        obj_J_k = self.getCurvatureObj()
 
-
-        obj_J = obj_J_centerline * self.loss_weight[0] + obj_J_tip * self.loss_weight[1
-                ] + obj_J_curveLength * self.loss_weight[2] + obj_J_k * self.loss_weight[3]
-
-        print("loss:", obj_J)
+        obj_J = obj_J_centerline * self.loss_weight[0] + obj_J_tip * self.loss_weight[
+            1] + obj_J_curveLength * self.loss_weight[2]
 
         if self.verbose:
             print('obj_J_all :', obj_J.detach().numpy())
@@ -2784,14 +2635,6 @@ class reconstructCurve():
         def closure():
             self.optimizer.zero_grad()
             self.loss = self.getCostFun(ref_point_contour, P0_gt)
-
-            # # try using anomally detection
-            # with torch.set_grad_enabled(True):
-            #     with torch.autograd.detect_anomaly():
-            #         self.loss.register_hook(lambda grad : print(grad))
-            #         self.loss.backward()
-            # # anomally detection end
-
             self.loss.backward()
             # print(self.para.grad)
 
@@ -2813,8 +2656,6 @@ class reconstructCurve():
             # calculate gradient
             # self.optimizer.zero_grad()
             # self.getCostFun(ref_point_contour).backward()
-            # if self.GD_Iteration > 5:
-            #     self.loss_weight = [0.0, 0.0, 0.0, 1.0]
 
             # print(self.para.grad)
 
@@ -2980,8 +2821,8 @@ if __name__ == '__main__':
     ##### ===========================================
     ###image path
     #img_path = "/home/fei/ARCLab-CCCatheter/data/rendered_images/dof2_64/dof2_c40_0.0005_-0.005_0.2_0.01.png"
-    #img_path = '/home/inffzy/Desktop/ARCLab/ARCLab-CCCatheter/results/UN002/D00_0000/images/001.png'
-    img_path = '/Users/Candice/Documents/UCSD/research/reconstruction/test/blenderpic1.png'
+    img_path = '/home/inffzy/Desktop/ARCLab/ARCLab-CCCatheter/results/UN002/D00_0000/images/001.png'
+
     ### ground truth bezier curve length from P0 to P1
     curve_length_gt = 0.1906
 
@@ -2989,26 +2830,19 @@ if __name__ == '__main__':
     P0_gt = torch.tensor([0.02, 0.002, 0.0])
 
     ### ground truth bezier points : [PC, P1]
-    #para_gt = torch.tensor([0.02003904, 0.0016096, 0.10205799, 0.02489567, -0.04695673, 0.19168896], dtype=torch.float)
-    para_gt = torch.tensor([0.01260366, 0.0096857, 0.09670098, -0.00926438,  0.03240929,  0.18920555], dtype=torch.float)
-
+    para_gt = torch.tensor([0.02003904, 0.0016096, 0.10205799, 0.02489567, -0.04695673, 0.19168896], dtype=torch.float)
 
     ### initialized bezier points : [P0, PC, P1]
-    #para_init = torch.tensor([0.01957763, 0.00191553, 0.09690971, -0.03142124, -0.00828425, 0.18168159],
-    #                         dtype=torch.float,
-    #                         requires_grad=True)
-    para_init = torch.tensor([0.020025, 0.002025, 0.10001099, 0.02009999, 0.00209999, 0.20002193],
-                                dtype=torch.float,
-                                requires_grad=True)
+    para_init = torch.tensor([0.01957763, 0.00191553, 0.09690971, -0.03142124, -0.00828425, 0.18168159],
+                             dtype=torch.float,
+                             requires_grad=True)
     # para_init = torch.tensor([0.02003904, 0.0016096, 0.10205799, 0.02489567, -0.04695673, 0.19168896],
     #                          dtype=torch.float,
     #                          requires_grad=True)
 
     ### initialized weights for three different loss
-    #loss_weight = torch.tensor([1.0, 100.0, 0.0, 1.0])
+    loss_weight = torch.tensor([1.0, 100.0, 0.0])
 
-    ##loss weight test by chong
-    loss_weight = torch.tensor([1.0, 0.0, 0.0, 0.0])
     ### total itr for gradients optimization
     total_itr = 100
 
