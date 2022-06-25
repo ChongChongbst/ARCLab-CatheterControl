@@ -75,6 +75,10 @@ class reconstructCurve():
         self.pos_bezier_3D_gt = self.getBezier3pts(self.para_gt, self.P0_gt)
         self.pos_bezier_3D_init = self.getBezier3pts(para_init, self.P0_gt)
 
+        # get ground truth 2D curvature change
+        self.k_goal = self.findCurvatureChange2D(self.skeleton)
+
+
 
     ##### ===========================================
     #       Image Process Functions Group
@@ -173,7 +177,7 @@ class reconstructCurve():
 
 
     ##### ===========================================
-    #       Curve Functions Group
+    #       Bezier Curve Functions Group
     ##### =========================================== 
 
     def getBezier3pts(self, para, P0, num_samples=200):
@@ -241,9 +245,13 @@ class reconstructCurve():
         self.der_bezier_cam = der_bezier_cam_H[:, :-1]
 
 
+    ##### ===========================================
+    #       Centerline Functions Group
+    ##### =========================================== 
+
     def processCenterlineItr(self):
         '''
-        Arrage the points got diresctly from bezier curve
+        Arrage the points got directly from bezier curve
 
         Variables: 
             self.proj_bezier_img: the projected 2D points on image frame of the parameters updated through every iteration
@@ -297,6 +305,84 @@ class reconstructCurve():
 
 
     ##### ===========================================
+    #       Curvature Functions Group
+    ##### =========================================== 
+    def findCurvatureChange2D(self, p2d_list_applied, n=10):
+        '''
+        Find the curvature changing along the 2D points list 
+        with linear least square fit
+
+        Args:
+            p2d_list ((,2) tensor): the list of 2D points to be calculated
+            n (int): the interval to calculate the curvature
+        '''
+
+        p2d_list = torch.clone(p2d_list_applied)
+        N = len(p2d_list)
+        k = torch.zeros(int((N-n)/n))
+        p2d = torch.zeros((3,3))
+        A = torch.tensor([[0, -1, 0], [1, 0, 0], [0, 0, 1]], dtype=torch.float)
+
+        i = n
+        ki = 0
+        while i < N-n:
+
+            if (i-n) < 0:
+                p2d[0] = torch.cat((p2d_list[0], torch.tensor([1])), 0)
+            else:
+                p2d[0] = torch.cat((p2d_list[i-n], torch.tensor([1])), 0)
+
+            p2d[1] = torch.cat((p2d_list[i], torch.tensor([1])), 0)
+
+            if (i+n) > (N-1):
+                p2d[2] = torch.cat((p2d_list[N-1], torch.tensor([1])), 0)
+            else:
+                p2d[2] = torch.cat((p2d_list[i+n], torch.tensor([1])), 0)
+
+            d1 = torch.linalg.norm(p2d[0]-p2d[1])+1e-10
+            d2 = torch.linalg.norm(p2d[1]-p2d[2])+1e-10
+            d3 = torch.linalg.norm(p2d[0]-p2d[2])+1e-10
+
+            s = torch.tensor(0.5) * torch.matmul((p2d[0]-p2d[2]), torch.matmul(A, (p2d[0]-p2d[1])))
+
+            k[ki] = torch.tensor(4) * s / (d1 * d2 * d3)
+
+            ki += 1
+            i += n
+
+
+        return k
+
+
+    def plotCurvatureEval(self, k_iter):
+        '''
+        plot the curvature change of the desired curve
+        and the curvature change of the constantly updated curve
+        then save the plot pictures in the targetted folder
+
+        Args:
+            k_iter ((,1) tensor): the curvature change updated through every iteration
+        '''
+
+        k_goal = torch.clone(self.k_goal)
+        k_goal_plt = k_goal.detach().numpy()
+        k_iter_plt = k_iter.detach().numpy()
+
+        x1 = range(len(k_iter_plt))
+        x2 = range(len(k_goal_plt))
+        
+        plt.figure()
+        plt.plot(x1, k_iter_plt, color='b')
+        plt.plot(x2, k_goal_plt, color='r')
+        
+        plt.ylabel('curvature')
+        plt.title('the evaluation of curvature')
+        plt.savefig(self.path + '/eval/' +str(self.GD_Iteration)+'.jpg')
+        plt.close()
+
+     
+
+    ##### ===========================================
     #       Obj Functions Group
     ##### =========================================== 
 
@@ -311,7 +397,6 @@ class reconstructCurve():
             err_skeleton_sum_by_corresp: the error of the difference between desired centerline and the centerline in very iteration
             err_obj_tip: the difference of the tip position
         '''
-        self.findCorrespCenterlineItr()
 
         skeleton = torch.clone(self.skeleton)
         pts_from_bezier = torch.clone(self.pts_from_bezier)
@@ -321,28 +406,7 @@ class reconstructCurve():
 
         err_obj_Tip = torch.linalg.norm(skeleton[0, :] - pts_from_bezier[0, :], ord=None)
 
-        return err_skeleton_sum_by_corresp, err_obj_Tip
-
-    def CurvatureFitted3D(self, n):
-        '''
-        Find the curvature change of 1000 points on the fitted 3D curve
-
-        Args:
-            n (int): the interval of points
-        '''
-        findk = FindCurvature(self.P0_gt, self.para)
-        p3d_fitted_1000 = findk.get_points_on_curve(1000)
-        k_fitted_1000 = findk.curvature_change(p3d_fitted_1000,n,1)
-        p2d_fitted_1000 = findk.project_3d_to_2d(p3d_fitted_1000) 
-
-        k_fitted_1000 = torch.from_numpy(k_fitted_1000)
-        p2d_fitted_1000 = torch.from_numpy(p2d_fitted_1000)
-        p2d_fitted_1000 = torch.flip(p2d_fitted_1000, dims=[0])  
-
-        # the value is updated for the plot function
-        self.p2d_fitted_1000 = p2d_fitted_1000.clone().detach()
-
-        return k_fitted_1000     
+        return err_skeleton_sum_by_corresp, err_obj_Tip 
 
 
     def getCurvatureObj(self):
@@ -354,103 +418,23 @@ class reconstructCurve():
             k ((N,1) tensor): the curvature change of the targeted catheter pose projected on the 2D frame
         '''
 
-        # the skeleton obtained from raw image
-        # the final position(2D) that the bezier curve(3D) should fit
-        skeleton = torch.as_tensor(self.img_raw_skeleton).float()
-        if skeleton[0,1] >= 620:
-            skeleton = torch.flip(skeleton, dims=[0])
-        skeleton = torch.flip(skeleton, dims=[1])
+        centerline = torch.clone(self.centerline)
 
-        N = len(skeleton)
-        n = 10
-        k = torch.zeros(N-2)
-        print(N)
+        k_goal = torch.clone(self.k_goal)
+        k_itr = self.findCurvatureChange2D(centerline)
 
-        # Find the curvature change value of the 3D curvature fitted
-        # from every iteration
-        k_fitted_1000 = self.CurvatureFitted3D(n)
+        N = k_goal.shape[0]
 
-        # find the corresponding curvature on the projected image
-        k_by_corresp = []
-        # index value for debuging
-        indexes = []
-        # the first curvature must be corresponding tip
-        k_by_corresp.append(k_gt_1000[0])
-        indexes.append(torch.tensor(0))
+        sum = 0
+        for i in range(N):
+            if k_goal[i] != 0:
+                diff_i = torch.abs(k_goal[i] - k_itr[i])
+                sum += diff_i
 
-        p2d_gt = []
-        k_gt = []
-
-        for i in range(1000):
-            if self.isPointInImage(p2d_gt_1000[i], self.res_width,self.res_height):
-                p2d_gt.append(p2d_gt_1000[i])
-                k_gt.append(k_gt_1000[i])                
-
-        p2d_gt = torch.stack(p2d_gt)
-        k_gt = torch.stack(k_gt)
-
-        for i in range(1,N-2):
-            err = torch.linalg.norm(skeleton[i] - p2d_gt, dim=1)
-            #pdb.set_trace()
-            index = torch.argmin(err)
-            # index values for debuging
-            indexes.append(index)
-            temp = k_gt[index, ]
-            # in case of finding the same curvature in different indexes and
-            # in case of finding the curvature before the searched indexes
-            k_by_corresp.append(temp)
-
-        k_by_corresp = torch.stack(k_by_corresp)
-        self.indexes = torch.stack(indexes)
-        # end of the finding process
-        # pdb.set_trace()
-        # print(indexes)
-        p2d = torch.zeros((3,3))    # store 2d skeleton obtained from image
-
-        A = torch.tensor([[0, -1, 0], [1, 0, 0], [0, 0, 1]], dtype=torch.float)
-
-        # find curvature change on projected image      
-        for i in range(N-1)[1:]:
-            if (i-n) < 0:
-                p2d[0] = torch.cat((skeleton[0], torch.tensor([1])), 0)
-            else:
-                p2d[0] = torch.cat((skeleton[i-n], torch.tensor([1])), 0)
-
-            p2d[1] = torch.cat((skeleton[i], torch.tensor([1])), 0)
-
-            if (i+n) > (N-1):
-                p2d[2] = torch.cat((skeleton[N-1], torch.tensor([1])), 0)
-            else:
-                p2d[2] = torch.cat((skeleton[i+n], torch.tensor([1])), 0)
-
-            d1 = torch.linalg.norm(p2d[0]-p2d[1]) + 1e-08
-            d2 = torch.linalg.norm(p2d[1]-p2d[2]) + 1e-08
-            d3 = torch.linalg.norm(p2d[0]-p2d[2]) + 1e-08
-
-            s = 0.5 * torch.matmul((p2d[0]-p2d[2]), torch.matmul(A, torch.transpose((p2d[0]-p2d[1]), -1, 0)))
-
-            k[i-1] = 4 * s / (d1 * d2 * d3)
-
-        diff_k = torch.subtract(k, k_by_corresp)
-        obj_J_k = torch.nansum(diff_k)/N
-
-        # save the plotted figures in folder
-        k_plt = k.detach().numpy()
-
-        x1 = range(1,len(k_plt)+1)
-        x2 = range(1,N-1)
-        k_by_corresp_plt = k_by_corresp.detach().numpy()
-        plt.figure()
-        plt.plot(x1, k_plt, color='b')
-        plt.plot(x2, k_by_corresp_plt, color='r')
-        #plt.xlim(1,N-1)
-        plt.ylabel('curvature')
-        plt.title('the evaluation of curvature')
-        plt.savefig(self.path + '/eval/' +str(self.GD_Iteration)+'.jpg')
-        plt.close()
-        # save the plotted figures in folder       
-
-        #pdb.set_trace()     
+        self.plotCurvatureEval(k_itr)
+        
+        obj_J_k = sum/len(centerline)
+   
         return obj_J_k
 
 
@@ -461,6 +445,9 @@ class reconstructCurve():
     ##### =========================================== 
 
     def plotProjCenterline(self):
+        '''
+        To plot the final result
+        '''
         centerline_draw_img_rgb = self.raw_img_rgb.copy()
         curve_3D_opt = self.pos_bezier_3D.detach().numpy()
         curve_3D_gt = self.pos_bezier_3D_gt.detach().numpy()
@@ -532,14 +519,12 @@ class reconstructCurve():
     def drawlineandpts(self):
         '''
         draw projected centerline on the image
+        To evaluate the skeleton subtracted directly from the image has a right order
 
         Variables:
 
         '''
-        skeleton = torch.as_tensor(self.img_raw_skeleton).float()
-        if skeleton[0,1] >= 620:
-            skeleton = torch.flip(skeleton, dims=[0])
-        skeleton = torch.flip(skeleton, dims=[1])
+        skeleton = torch.clone(self.skeleton)
         centerline = skeleton.detach().numpy()
 
         img = self.raw_img_rgb.copy()
@@ -567,7 +552,7 @@ class reconstructCurve():
         plt.imshow(img)
 
 
-    def plotverifycurvature(self):
+    def plotverifycurve(self):
         '''
         plot to see if the indexes correspondence is correct
         Based on OpenCV image writer
@@ -580,19 +565,15 @@ class reconstructCurve():
         '''
         img = self.raw_img_rgb.copy()
 
-        skeleton = torch.as_tensor(self.img_raw_skeleton).float()
-        if skeleton[0,1] >= 620:
-            skeleton = torch.flip(skeleton, dims=[0])
-        skeleton = torch.flip(skeleton, dims=[1])
+        skeleton = torch.clone(self.skeleton)
+        centerline = torch.clone(self.centerline)
+
         skeleton = skeleton.detach().numpy()
+        centerline = centerline.detach().numpy()
 
-        centerline = self.p2d_gt_1000
-        indexes = self.indexes
-        N = len(indexes)
-
-        for i in range(N):
+        for i in range(len(skeleton)):
             pt1 = skeleton[i]
-            pt2 = centerline[indexes[i]]
+            pt2 = centerline[i]
 
             pt1_img = [int(pt1[0]), int(pt1[1])]
             pt2_img = [int(pt2[0]), int(pt2[1])]
@@ -613,8 +594,8 @@ class reconstructCurve():
             curve: The fitting process of curves
             eval: The learning process, loss evaluation
         '''
-        writer_c = imageio.get_writer(self.path+'/videos/curve.mp4', fps=5)
-        writer_e = imageio.get_writer(self.path+'/videos/eval.mp4', fps=5)
+        writer_c = imageio.get_writer(self.path+'/videos/curve.gif', fps=5)
+        writer_e = imageio.get_writer(self.path+'/videos/eval.gif', fps=5)
 
         for i in range(1,100):
             filename_c = os.path.join(self.path + '/curve/%d.jpg' %i)
@@ -667,14 +648,14 @@ class reconstructCurve():
 
         self.forwardProjection(control_pts)
 
+        # find the evaluated centerline in every iteration
+        self.findCorrespCenterlineItr()
+
         # The Obj obtained from the centerline
         obj_J_centerline, obj_J_tip = self.getCenterlineSegmentsObj()
 
         # The Obj obtained from the curvature
         obj_J_k = self.getCurvatureObj()
-
-        # Chong's plotOptimizet function
-        # self.drawlineandpts()
 
         obj_J = obj_J_centerline * self.loss_weight[0] + obj_J_tip * self.loss_weight[
                1] + obj_J_k * self.loss_weight[2]
@@ -730,7 +711,7 @@ class reconstructCurve():
             saved_value = np.hstack((last_loss.detach().numpy(), self.para.detach().numpy()))
             self.saved_opt_history = np.vstack((self.saved_opt_history, saved_value))
 
-            self.plotverifycurvature()
+            self.plotverifycurve()
 
         self.error = torch.abs(self.para - self.para_gt)
         print("Final --->", self.para)
@@ -754,7 +735,7 @@ if __name__ == '__main__':
     para_init = torch.tensor(para_init, dtype=torch.float, requires_grad=True) 
 
     # loss weight
-    loss_weight = torch.tensor([100.0, 0.0, 0.0])
+    loss_weight = torch.tensor([100.0, 10.0, 10.0])
     # total iteration for gradients optimization
     total_itr = 100
 
@@ -770,9 +751,9 @@ if __name__ == '__main__':
     # Constructor of Class Reconstruction
     BzrCURVE = reconstructCurve(img_path, curve_length_gt, P0_gt, para_gt, para_init, loss_weight, total_itr)
 
-    # # check if the order of centerline is right
-    # # already checked
-    # BzrCURVE.drawlineandpts()
+    # check if the order of centerline is right
+    # already checked
+    BzrCURVE.drawlineandpts()
 
 
     # do optimization

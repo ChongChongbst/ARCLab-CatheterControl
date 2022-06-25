@@ -117,14 +117,14 @@ experiments = {
 #         'damping_weights': [0, 0, 0],
 #         'n_mid_points': 1},
     
-     'UN015': {'dof': 3, 
-         'loss_2d': True,
-         'tip_loss': False,
-         'use_reconstruction': True,
-         'interspace': 0,
-         'viewpoint_mode': 1,
-         'damping_weights': [1, 1, 1e6],
-         'n_mid_points': 1},
+    #  'UN015': {'dof': 3, 
+    #      'loss_2d': True,
+    #      'tip_loss': False,
+    #      'use_reconstruction': True,
+    #      'interspace': 0,
+    #      'viewpoint_mode': 1,
+    #      'damping_weights': [1, 1, 1e6],
+    #      'n_mid_points': 1},
 
 
 
