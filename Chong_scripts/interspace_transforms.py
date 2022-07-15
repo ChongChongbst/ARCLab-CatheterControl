@@ -1,6 +1,6 @@
 import torch
 
-def inverse_kinematic_3dof(p_end):
+def inverse_kinematic_3dof(p_start, p_end):
     '''
     Calculate interspace transformation from cc curve end point to configuration [phi, theta, l]
                                     from end point to configuration space
@@ -11,9 +11,9 @@ def inverse_kinematic_3dof(p_end):
     Return:
         the parameters in configuration space
     '''
-    x = p_end[0]
-    y = p_end[1]
-    z = p_end[2]
+    x = p_end[0] - p_start[0]
+    y = p_end[1] - p_start[1]
+    z = p_end[2] - p_start[2]
 
     phi = torch.atan(y/x)
 
