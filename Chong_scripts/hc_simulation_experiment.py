@@ -16,4 +16,5 @@ ux_init = 0.00001
 uy_init = 0.00001
 l_init = 0.2
 
+
 catheter = CCCatheter(p_0, l, r, loss_2d, tip_loss, n_mid_points, n_iter, verbose=0)
