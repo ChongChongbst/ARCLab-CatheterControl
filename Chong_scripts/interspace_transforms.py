@@ -26,7 +26,7 @@ def inverse_kinematic_3dof(p_start, p_end):
 
     l = theta/k
 
-    return torch.tensor[phi, theta, l]
+    return torch.tensor([phi, theta, l])
 
 def para_transform_3dof(phi, theta, l, r):
     '''

@@ -9,6 +9,7 @@ sys.path.append('/home/candice/Documents/ARCLab-CCCatheter/scripts')
 from skimage.morphology import skeletonize
 
 from find_curvature import FindCurvature
+import interspace_transforms as it
 
 import matplotlib.cm as cm
 from mpl_toolkits.mplot3d import Axes3D
@@ -23,7 +24,7 @@ import imageio
 import random
 
 class reconstructCurve():
-    def __init__(self, img_path, curve_length_gt, P0_gt, para_gt, para_init, loss_weight, total_itr, verbose=1):
+    def __init__(self, img_path, curve_length_gt, P0_gt, para_gt, ux_gt, uy_gt, l_gt, r, para_init, loss_weight, total_itr, verbose=1):
         '''
         Args:
             P0_gt ((1,3) tensor): the start point of the ground truth bezier curve
@@ -36,6 +37,7 @@ class reconstructCurve():
         self.curve_length_gt = curve_length_gt
         self.P0_gt = P0_gt
         self.para_gt = para_gt
+        self.r = r
         self.para = para_init
         self.loss_weight = loss_weight
         self.total_itr = total_itr 
@@ -71,13 +73,24 @@ class reconstructCurve():
         self.getContourSamples()
         self.processSkeletonImg()
 
-        # get ground truth 3D bezier curve
+        # get ground truth 3D points
         self.pos_bezier_3D_gt = self.getBezier3pts(self.para_gt, self.P0_gt)
         self.pos_bezier_3D_init = self.getBezier3pts(para_init, self.P0_gt)
 
         # get ground truth 2D curvature change
         self.k_goal = self.findCurvatureChange2D(self.skeleton)
 
+        # get ground truth image tip point after a small shift
+        d_ux = 1e-5
+        d_uy = 1e-5
+        p_end_actual = it.cc_transform_3dof(P0_gt, ux_gt+d_ux, uy_gt+d_uy, l_gt, r, s=1)
+        self.p2d_end_gt = self.getProjPointCam(p_end_actual, self.cam_K)
+
+
+    def set_img(self):
+        '''
+        set image path and find the ground truth centerline
+        '''
 
 
     ##### ===========================================
@@ -212,8 +225,8 @@ class reconstructCurve():
         Variables:
             self.num_samples: the number of points should be extracted from the bezier curve
             self.pos_bezier_3D: 3D points on the bezier curve
-            self.pos_bezier_cam: 2D points on the projected bezier curve
-            self.der_bezier_cam: 2D directions on the projected bezier curve
+            self.pos_bezier_cam: 3D points on the bezier curve after regulated by camera parameter
+            self.der_bezier_cam: 3D directions on the bezier curve after regulated by camera parameter
         '''
 
         P1 = control_pts[0, :]
@@ -257,10 +270,12 @@ class reconstructCurve():
             self.proj_bezier_img: the projected 2D points on image frame of the parameters updated through every iteration
                                 from function [getBezier4pts] <-- here the number of points is defined
         Results:
-            self.pts_from_bezier: the points projected to 2D image frame updated through every iteration
+            self.p2d_from_bezier: the points projected to 2D image frame updated through every iteration
         '''
-        pts_from_bezier = torch.clone(self.proj_bezier_img)
-        self.pts_from_bezier = torch.flip(pts_from_bezier, dims=[0])
+        p2d_from_bezier = torch.clone(self.proj_bezier_img)
+        p3d_from_bezier = torch.clone(self.pos_bezier_3D)
+        self.p2d_from_bezier = torch.flip(p2d_from_bezier, dims=[0])
+        self.p3d_from_bezier = torch.flip(p3d_from_bezier, dims=[0])
 
 
     def processSkeletonImg(self):
@@ -293,13 +308,13 @@ class reconstructCurve():
         '''
         skeleton = torch.clone(self.skeleton)
         self.processCenterlineItr()
-        pts_from_bezier = torch.clone(self.pts_from_bezier)
+        p2d_from_bezier = torch.clone(self.p2d_from_bezier)
 
         centerline = []
         for i in range(skeleton.shape[0]):
-            err = torch.linalg.norm(skeleton[i] - pts_from_bezier, ord=None, axis=1)
+            err = torch.linalg.norm(skeleton[i] - p2d_from_bezier, ord=None, axis=1)
             index = torch.argmin(err)
-            temp = pts_from_bezier[index, ]
+            temp = p2d_from_bezier[index, ]
             centerline.append(temp)
         self.centerline = torch.stack(centerline)
 
@@ -391,7 +406,7 @@ class reconstructCurve():
         get obj from finding centerline points correspondence
 
         Variables:
-            self.centerline: the points from *pts_from_bezier* arranged by *skeleton*
+            self.centerline: the points from *p2d_from_bezier* arranged by *skeleton*
 
         Results:
             err_skeleton_sum_by_corresp: the error of the difference between desired centerline and the centerline in very iteration
@@ -399,19 +414,19 @@ class reconstructCurve():
         '''
 
         skeleton = torch.clone(self.skeleton)
-        pts_from_bezier = torch.clone(self.pts_from_bezier)
+        p2d_from_bezier = torch.clone(self.p2d_from_bezier)
 
         err_skeleton_by_corresp = torch.linalg.norm(skeleton - self.centerline, ord=None, axis=1) / 1.0
-        err_skeleton_sum_by_corresp = torch.sum(err_skeleton_by_corresp) / pts_from_bezier.shape[0]
+        err_skeleton_sum_by_corresp = torch.sum(err_skeleton_by_corresp) / p2d_from_bezier.shape[0]
 
-        err_obj_Tip = torch.linalg.norm(skeleton[0, :] - pts_from_bezier[0, :], ord=None)
+        err_obj_Tip = torch.linalg.norm(skeleton[0, :] - p2d_from_bezier[0, :], ord=None)
 
         return err_skeleton_sum_by_corresp, err_obj_Tip 
 
 
     def getCurvatureObj(self):
         '''
-        return the difference of discrete curvature
+        return the loss of discrete curvature
 
         Variables:
             k_by_corresp ((N,1) tensor): the curvature change of every iteration
@@ -436,6 +451,32 @@ class reconstructCurve():
         obj_J_k = sum/len(centerline)
    
         return obj_J_k
+
+    def getMoveObj(self, d_ux=1e-5, d_uy=1e-5):
+        '''
+        return the loss between projected and actual tip point after a small shiff
+
+        Variables:
+            p_start ((3,1) tensor): the fixed start point of the Bezier Curve
+            p_end ((3,1) tensor): the end point of reconstructed Bezier Curve with every iteration
+        '''
+        p3d_from_bezier = torch.clone(self.p3d_from_bezier)
+        p_start = self.P0_gt
+        p_end = p3d_from_bezier[0, :]
+        print(p_start)
+        print(p_end)
+        r = 0.01
+        config = it.inverse_kinematic_3dof(p_start, p_end)
+        config_u = it.para_transform_3dof(config[0], config[1], config[2], r)
+        p_end_learned = it.cc_transform_3dof(p_start, config_u[0]+d_ux, config_u[1]+d_uy, config_u[2], r, s=1)
+        p2d_end_learned = self.getProjPointCam(p_end_learned, self.cam_K)
+
+        obj_moved_end = torch.abs(p2d_end_learned - self.p2d_end_gt)
+
+        return obj_moved_end
+
+
+
 
 
 
@@ -657,8 +698,11 @@ class reconstructCurve():
         # The Obj obtained from the curvature
         obj_J_k = self.getCurvatureObj()
 
+        # The Obj obtained from the end point after a small shift
+        obj_moved_tip = self.getMoveObj()
+
         obj_J = obj_J_centerline * self.loss_weight[0] + obj_J_tip * self.loss_weight[
-               1] + obj_J_k * self.loss_weight[2]
+               1] + obj_J_k * self.loss_weight[2] + obj_moved_tip * self.loss_weight[3]
 
         print("loss:", obj_J)
 
@@ -729,13 +773,22 @@ if __name__ == '__main__':
     test_path = '/home/candice/Documents/ARCLab-CatheterControl/results/UN015/D00_0042'
     img_path = test_path + '/images/020.png'
     para_np = np.load(test_path+'/p3d_poses.npy')
+    config = np.load(test_path+'/params.npy')
     para = torch.from_numpy(para_np)
     para_init = torch.flatten(para[0])
     para_gt = torch.flatten(para[-1])
     para_init = torch.tensor(para_init, dtype=torch.float, requires_grad=True) 
 
+    # ground truth control parameters ux, uy and l
+    ux_gt = torch.tensor(config[-1,0], dtype=torch.float)
+    uy_gt = torch.tensor(config[-1,1], dtype=torch.float)
+    l_gt = torch.tensor(config[-1,2], dtype=torch.float)
+
+    # cross section radius of catheter
+    r = 0.01
+
     # loss weight
-    loss_weight = torch.tensor([100.0, 10.0, 10.0])
+    loss_weight = torch.tensor([100.0, 10.0, 10.0, 0])
     # total iteration for gradients optimization
     total_itr = 100
 
@@ -749,7 +802,7 @@ if __name__ == '__main__':
     #       Main reconstruction of bezier curve
     ##### ===========================================
     # Constructor of Class Reconstruction
-    BzrCURVE = reconstructCurve(img_path, curve_length_gt, P0_gt, para_gt, para_init, loss_weight, total_itr)
+    BzrCURVE = reconstructCurve(img_path, curve_length_gt, P0_gt, para_gt, ux_gt, uy_gt, l_gt, r, para_init, loss_weight, total_itr)
 
     # check if the order of centerline is right
     # already checked
