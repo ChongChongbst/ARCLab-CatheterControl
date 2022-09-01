@@ -11,7 +11,9 @@ def world_to_image_transform(p, camera_extrinsics, fx, fy, cx, cy):
         camera_extrinsics ((4, 4) numpy array): RT matrix 
         fx (float): horizontal direction focal length
         fy (float): vertical direction focal length
-        cx (float): horizontal center of image
+        cx (float): horizontal c
+        
+        enter of image
         cy (float): vertical center of image
     """
     p_4d = np.append(p, 1)
@@ -84,6 +86,8 @@ def cc_transform_1dof(p_0, phi, u, l, r, s=1):
         l (float): length of catheter
         r (float): cross section radius of catheter
         s (float from 0 to 1 inclusive): s value representing position on the CC curve
+
+    
     """
     p_0_4d = np.append(p_0, 1)
     k = u / r
@@ -114,9 +118,9 @@ def cc_transform_3dof(p_0, ux, uy, l, r, s=1):
     k = u / r
 
     T = np.array([
-        [1 + (ux ** 2) / (u ** 2) * (np.cos(k * s) - 1), ux * uy / (u ** 2) * (np.cos(k * s) - 1),       -1 * ux / u * np.sin(k * s), r * l * ux * (1 - np.cos(k * s)) / (u ** 2)],
-        [ux * uy / (u ** 2) * (np.cos(k * s) - 1),       1 + (uy ** 2) / (u ** 2) * (np.cos(k * s) - 1), -1 * uy / u * np.sin(k * s), r * l * uy * (1 - np.cos(k * s)) / (u ** 2)],
-        [ux / u * np.sin(k * s),                         uy / u * np.sin(k * s),                         np.cos(k * s),               r * l * np.sin(k * s) / u                  ],
+        [1 + (ux ** 2) / (u ** 2) * (np.cos(k * s) - 1), ux * uy / (u ** 2) * (np.cos(k * s) - 1),       1 * ux / u * np.sin(k * s), r * l * ux * (1 - np.cos(k * s)) / (u ** 2)],
+        [ux * uy / (u ** 2) * (np.cos(k * s) - 1),       1 + (uy ** 2) / (u ** 2) * (np.cos(k * s) - 1), 1 * uy / u * np.sin(k * s), r * l * uy * (1 - np.cos(k * s)) / (u ** 2)],
+        [-ux / u * np.sin(k * s),                        -uy / u * np.sin(k * s),                         np.cos(k * s),               r * l * np.sin(k * s) / u                  ],
         [0,                                              0,                                              0,                           1                                          ]], dtype=object)
 
     return (T @ p_0_4d)[:3]

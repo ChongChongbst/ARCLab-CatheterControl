@@ -91,7 +91,7 @@ for exp_name in experiments:
 
             sim_exp = SimulationExperiment(dof, loss_2d, tip_loss, use_reconstruction, interspace, viewpoint_mode, damping_weights, noise_percentage, n_iter, render_mode)
             sim_exp.set_paths(images_save_dir, cc_specs_save_dir, params_report_path, p3d_report_path, p2d_report_path)
-            sim_exp.set_general_parameters(p_0, r, n_miad_points, l)
+            sim_exp.set_general_parameters(p_0, r, n_mid_points, l)
 
             if dof == 2:
                 sim_exp.set_2dof_parameters(ux, uy, ux_target, uy_target)

@@ -620,7 +620,7 @@ class CCCatheter:
 
     def calculate_beziers_control_points(self):
         """
-        Given the list of points on the constant curvature curve, alculate the control points for a
+        Given the list of points on the constant curvature curve, calculate the control points for a
             number of Bezier curves. The number of Bezier curves is determined by number of cc points // 2 
         """
         if not self.cc_pt_list:

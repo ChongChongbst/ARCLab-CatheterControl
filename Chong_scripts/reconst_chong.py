@@ -1,3 +1,4 @@
+from csv import unix_dialect
 import pstats
 import cv2
 import numpy as np
@@ -42,6 +43,9 @@ class reconstructCurve():
         self.loss_weight = loss_weight
         self.total_itr = total_itr 
         self.verbose = verbose
+
+        self.itr_2d = int(total_itr*0.2)
+        self.itr_3d = total_itr - self.itr_2d
         # the path to save the pictures
         self.path = '/home/candice/Documents/ARCLab-CatheterControl/results'
 
@@ -66,7 +70,7 @@ class reconstructCurve():
         raw_img_rgb = cv2.imread(img_path)
         self.raw_img_rgb = cv2.resize(raw_img_rgb, (int(raw_img_rgb.shape[1] / downscale), int(raw_img_rgb.shape[0] / downscale)))
         self.raw_img = cv2.cvtColor(raw_img_rgb, cv2.COLOR_RGB2GRAY)
-
+F
         self.saved_opt_history = np.zeros((1, self.para.shape[0] + 1))
 
         # get raw image skeleton
@@ -75,22 +79,16 @@ class reconstructCurve():
 
         # get ground truth 3D points
         self.pos_bezier_3D_gt = self.getBezier3pts(self.para_gt, self.P0_gt)
-        self.pos_bezier_3D_init = self.getBezier3pts(para_init, self.P0_gt)
+        self.pos_bezier_3D_init = self.getBezier3pts(para_init, self.P0_gt)                        
 
         # get ground truth 2D curvature change
         self.k_goal = self.findCurvatureChange2D(self.skeleton)
 
         # get ground truth image tip point after a small shift
-        d_ux = 1e-5
-        d_uy = 1e-5
-        p_end_actual = it.cc_transform_3dof(P0_gt, ux_gt+d_ux, uy_gt+d_uy, l_gt, r, s=1)
-        self.p2d_end_gt = self.getProjPointCam(p_end_actual, self.cam_K)
 
-
-    def set_img(self):
-        '''
-        set image path and find the ground truth centerline
-        '''
+        self.shift_list=torch.tensor([0,-5e-4, 5e-4, 8e-4])
+        p_end_actual = it.para2_mul_shifted_3dof_list(P0_gt, ux_gt, uy_gt, l_gt, r, self.shift_list, num_samples=30)
+        self.p2d_end_shift_gt = self.getProjPointCam4EveryShift(p_end_actual, self.cam_K)
 
 
     ##### ===========================================
@@ -188,6 +186,21 @@ class reconstructCurve():
 
         return torch.transpose(torch.matmul(cam_K, divide_z)[:-1, :], 0, 1)
 
+    def getProjPointCam4EveryShift(self, p_list, cam_K):
+        '''
+        get the 2D point position on the image through 3D points and camera matrix
+        for every combination of shift
+
+
+        Args:
+            p ((,3,) or (,,3) tensor): 3D point in the world frame
+            cam_K (tensor): camera matrix        
+        '''
+        p2d_list = torch.zeros(p_list.size(0), p_list.size(1), 2)
+        for i,p in enumerate(p_list):
+            p2d_list[i, :, :] = self.getProjPointCam(p, cam_K)
+
+        return p2d_list
 
     ##### ===========================================
     #       Bezier Curve Functions Group
@@ -392,7 +405,7 @@ class reconstructCurve():
         
         plt.ylabel('curvature')
         plt.title('the evaluation of curvature')
-        plt.savefig(self.path + '/eval/' +str(self.GD_Iteration)+'.jpg')
+        plt.savefig(self.path + '/eval/' +str(self.GD_Iteration_2d)+'.jpg')
         plt.close()
 
      
@@ -452,26 +465,36 @@ class reconstructCurve():
    
         return obj_J_k
 
-    def getMoveObj(self, d_ux=1e-5, d_uy=1e-5):
+
+    def getMoveObj(self):
         '''
-        return the loss between projected and actual tip point after a small shiff
+        return the loss between projected and actual tip point after a small shift
 
         Variables:
             p_start ((3,1) tensor): the fixed start point of the Bezier Curve
             p_end ((3,1) tensor): the end point of reconstructed Bezier Curve with every iteration
         '''
-        p3d_from_bezier = torch.clone(self.p3d_from_bezier)
-        p_start = self.P0_gt
-        p_end = p3d_from_bezier[0, :]
-        print(p_start)
-        print(p_end)
-        r = 0.01
-        config = it.inverse_kinematic_3dof(p_start, p_end)
-        config_u = it.para_transform_3dof(config[0], config[1], config[2], r)
-        p_end_learned = it.cc_transform_3dof(p_start, config_u[0]+d_ux, config_u[1]+d_uy, config_u[2], r, s=1)
-        p2d_end_learned = self.getProjPointCam(p_end_learned, self.cam_K)
+        num_samples = 30
+        shift_list = torch.clone(self.shift_list)
+        num_shift = shift_list.size(0) * shift_list.size(0) - 1
 
-        obj_moved_end = torch.abs(p2d_end_learned - self.p2d_end_gt)
+        p3d_from_bezier = torch.clone(self.p3d_from_bezier)
+
+        p3d_selected = torch.zeros(num_samples,3)
+        for i in range(num_samples):
+            p3d_selected[i,:] = p3d_from_bezier[int(i*len(p3d_from_bezier)/num_samples)]
+        
+        p_start = self.P0_gt
+        p2d_shifted_list = torch.zeros(num_shift, num_samples, 2)
+
+        for i,p3d in enumerate(p3d_selected):
+            config = it.get_phithetal_from_bezier(p_start, p3d)
+            config_u = it.get_uxuyl_from_phithetal(config[0], config[1], config[2], self.r)
+            p3d_shifted = it.multiple_shift(p_start, config_u[0], config_u[1], config_u[2], self.r, self.shift_list)
+            p2d_shifted_list[:,i,:] = self.getProjPointCam(p3d_shifted, self.cam_K)
+            
+
+        obj_moved_end = torch.sum(torch.linalg.norm((p2d_shifted_list - self.p2d_end_shift_gt), dim=0))
 
         return obj_moved_end
 
@@ -557,6 +580,48 @@ class reconstructCurve():
         plt.show()
 
 
+    def plotscalecenterline(self):
+        curve_3D_opt = self.pos_bezier_3D.detach().numpy()
+        curve_3D_gt = self.pos_bezier_3D_gt.detach().numpy()
+        curve_3D_init = self.pos_bezier_3D_init.detach().numpy()        
+
+        fig = plt.figure()
+        ax = Axes3D(fig)
+
+        ax.plot3D(curve_3D_gt[:, 0], curve_3D_gt[:, 1], curve_3D_gt[:, 2], color='#1f640a', linestyle='-', linewidth=2)
+        ax.plot3D(curve_3D_init[:, 0],
+                   curve_3D_init[:, 1],
+                   curve_3D_init[:, 2],
+                   color='#a64942',
+                   linestyle='--',
+                   linewidth=2)  ## green
+        ax.plot3D(curve_3D_opt[:, 0],
+                   curve_3D_opt[:, 1],
+                   curve_3D_opt[:, 2],
+                   color='#6F69AC',
+                   linestyle='-',
+                   linewidth=2)
+        ax.scatter(curve_3D_opt[-1, 0], curve_3D_opt[-1, 1], curve_3D_opt[-1, 2], marker='^', s=20,
+                    c=['#FFC069'])  ## yellow
+        ax.scatter(curve_3D_opt[0, 0], curve_3D_opt[0, 1], curve_3D_opt[0, 2], marker='o', s=20, c=['#FFC069'])
+
+        ax.quiver([0.0], [0.0], [0.0], [0.02], [0.0], [0.0], length=0.015, normalize=True, colors=['#911F27'])
+        ax.quiver([0.0], [0.0], [0.0], [0.00], [0.005], [0.0], length=0.003, normalize=True, colors=['#57CC99'])
+        ax.quiver([0.0], [0.0], [0.0], [0.00], [0.0], [0.04], length=0.04, normalize=True, colors=['#22577A'])
+
+        ax.set_xlabel('X')
+        ax.set_ylabel('Y')
+        ax.set_zlabel('Z')
+        ax.locator_params(nbins=4, axis='x')
+        ax.locator_params(nbins=4, axis='y')
+        ax.locator_params(nbins=4, axis='z')
+        ax.view_init(22, -26)
+        ax.set_title('gt/init/opt : green/red/blue')
+
+        plt.gca().set_box_aspect((1,2,5))
+        plt.show()
+
+
     def drawlineandpts(self):
         '''
         draw projected centerline on the image
@@ -623,7 +688,7 @@ class reconstructCurve():
             cv2.circle(img, pt2_img, radius=3, color=(0,255,0), thickness=4)
             cv2.line(img, pt1_img, pt2_img, color=(255,0,0), thickness=1, lineType=4)
 
-        filename = self.path + '/curve/' + str(self.GD_Iteration) + '.jpg'
+        filename = self.path + '/curve/' + str(self.GD_Iteration_2d) + '.jpg'
         cv2.imwrite(filename, img)
 
 
@@ -670,7 +735,7 @@ class reconstructCurve():
         assert not torch.any(torch.isnan(self.proj_bezier_img))
 
 
-    def getCostFun(self, ref_point_contour, P0_gt):
+    def getCostFun_2d(self, ref_point_contour, P0_gt):
 
         P1 = P0_gt
         P2 = torch.zeros(3)
@@ -698,11 +763,8 @@ class reconstructCurve():
         # The Obj obtained from the curvature
         obj_J_k = self.getCurvatureObj()
 
-        # The Obj obtained from the end point after a small shift
-        obj_moved_tip = self.getMoveObj()
-
         obj_J = obj_J_centerline * self.loss_weight[0] + obj_J_tip * self.loss_weight[
-               1] + obj_J_k * self.loss_weight[2] + obj_moved_tip * self.loss_weight[3]
+               1] + obj_J_k * self.loss_weight[2]
 
         print("loss:", obj_J)
 
@@ -711,14 +773,14 @@ class reconstructCurve():
         
         return obj_J
 
-    def getOptimize(self, ref_point_contour, P0_gt):
+    def getOptimize_2d(self, ref_point_contour, P0_gt):
         '''
         The main learning process
 
         Variables:
             self.optimizer: the torch optimizer
             self.loss: the value of loss calculated
-            self.GD_Iteration: the number of iteration has been run
+            self.GD_Iteration_@d: the number of iteration has been run
             self.verbose: to print the learning steps or not
 
         Returned Value:
@@ -727,27 +789,28 @@ class reconstructCurve():
         '''
         def closure():
             self.optimizer.zero_grad()
-            self.loss = self.getCostFun(ref_point_contour, P0_gt)
-            self.loss.backward()
+            self.loss = self.getCostFun_2d(ref_point_contour, P0_gt)
+            self.loss.backward(retain_graph=True)
             return self.loss
         
         self.optimizer = torch.optim.Adam([self.para], lr=1e-3)
         self.optimizer.zero_grad()
         loss_history = []
+
         last_loss = 99.0    # current loss value
 
-        converge = False    # converge or not
-        self.GD_Iteration = 0   # number of updates
+        converge_2d = False    # converge or not
+        self.GD_Iteration_2d = 0   # number of updates
 
-        while not converge and self.GD_Iteration < self.total_itr:
+        while not converge_2d and self.GD_Iteration_2d < self.itr_2d:
             self.optimizer.step(closure)
             if (abs(self.loss - last_loss) < 1e-6):
                 converge = True
-            self.GD_Iteration += 1
+            self.GD_Iteration_2d += 1
 
             if self.verbose:
                 print("Curr para : ", self.para)
-                print("------------------------ FINISH ", self.GD_Iteration, " ^_^ STEP ------------------------ \n")
+                print("------------------------ FINISH ", self.GD_Iteration_2d, " ^_^ STEP ------------------------ \n")
             
             last_loss = torch.clone(self.loss)
             loss_history.append(last_loss)
@@ -756,6 +819,99 @@ class reconstructCurve():
             self.saved_opt_history = np.vstack((self.saved_opt_history, saved_value))
 
             self.plotverifycurve()
+
+
+        self.error = torch.abs(self.para - self.para_gt)
+        print("Final --->", self.para)
+        print("GT    --->", self.para_gt)
+        print("Error --->", self.error)
+
+        return self.saved_opt_history, self.para
+
+
+    def getCostFun_3d(self, ref_point_contour, P0_gt):
+
+        P1 = P0_gt
+        P2 = torch.zeros(3)
+        C = torch.zeros(3)
+        
+        C[0], C[1], C[2] = self.para[0], self.para[1], self.para[2]
+        P2[0], P2[1], P2[2] = self.para[3], self.para[4], self.para[5]
+
+        P1_EM0inCam = P1 + self.OFF_SET
+        P2_EM0inCam = P2 + self.OFF_SET
+        self.C_EM0inCam = C + self.OFF_SET
+
+        P1p = 2 / 3 * self.C_EM0inCam + 1 / 3 * P1_EM0inCam
+        P2p = 2 / 3 * self.C_EM0inCam + 1 / 3 * P2_EM0inCam
+        control_pts = torch.vstack((P1_EM0inCam, P1p, P2_EM0inCam, P2p))
+
+        self.forwardProjection(control_pts)
+
+        # find the evaluated 2d and 3d centerline points in every iteration
+        self.processCenterlineItr()
+
+        # The Obj obtained from the centerline
+        obj_J_centerline, obj_J_tip = self.getCenterlineSegmentsObj()
+
+        # The Obj obtained from the moved tip point
+        obj_moved_tip = self.getMoveObj()
+        
+
+        obj = obj_J_centerline * self.loss_weight[0] + obj_J_tip * self.loss_weight[
+               1] + obj_moved_tip * self.loss_weight[3]
+
+        print("loss:", obj)
+
+        if self.verbose:
+            print("obj_J_all :", obj.detach().numpy())
+        
+        return obj
+
+    def getOptimize_3d(self, ref_point_contour, P0_gt):
+        '''
+        The main learning process
+
+        Variables:
+            self.optimizer: the torch optimizer
+            self.loss: the value of loss calculated
+            self.GD_Iteration_@d: the number of iteration has been run
+            self.verbose: to print the learning steps or not
+
+        Returned Value:
+            self.saved_opt_history
+            self.para
+        '''
+        def closure():
+            self.optimizer.zero_grad()
+            self.loss = self.getCostFun_3d(ref_point_contour, P0_gt)
+            self.loss.backward(retain_graph=True)
+            return self.loss
+        
+        self.optimizer = torch.optim.Adam([self.para], lr=6e-3)
+        self.optimizer.zero_grad()
+        loss_history = []
+        last_loss = 99.0    # current loss value
+
+        converge_3d = False    # converge or not
+        self.GD_Iteration_3d = 0   # number of updates
+
+        while not converge_3d and self.GD_Iteration_3d < self.itr_3d:
+            self.optimizer.step(closure)
+            if (abs(self.loss - last_loss) < 1e-6):
+                converge_3d = True
+            self.GD_Iteration_3d += 1
+
+            if self.verbose:
+                print("Curr para : ", self.para)
+                print("------------------------ FINISH ", self.GD_Iteration_3d, " ^_^ STEP ------------------------ \n")
+            
+            last_loss = torch.clone(self.loss)
+            loss_history.append(last_loss)
+
+            saved_value = np.hstack((last_loss.detach().numpy(), self.para.detach().numpy()))
+            self.saved_opt_history = np.vstack((self.saved_opt_history, saved_value))
+
 
         self.error = torch.abs(self.para - self.para_gt)
         print("Final --->", self.para)
@@ -770,13 +926,13 @@ if __name__ == '__main__':
     ##### ===========================================
     #       Initialization
     ##### =========================================== 
-    test_path = '/home/candice/Documents/ARCLab-CatheterControl/results/UN015/D00_0042'
-    img_path = test_path + '/images/020.png'
+    test_path = '/home/candice/Documents/ARCLab-CatheterControl/results/UN015/D00_0002'
+    img_path = test_path + '/images/019.png'
     para_np = np.load(test_path+'/p3d_poses.npy')
     config = np.load(test_path+'/params.npy')
     para = torch.from_numpy(para_np)
     para_init = torch.flatten(para[0])
-    para_gt = torch.flatten(para[-1])
+    para_gt = torch.flatten(para[-3])
     para_init = torch.tensor(para_init, dtype=torch.float, requires_grad=True) 
 
     # ground truth control parameters ux, uy and l
@@ -788,9 +944,9 @@ if __name__ == '__main__':
     r = 0.01
 
     # loss weight
-    loss_weight = torch.tensor([100.0, 10.0, 10.0, 0])
+    loss_weight = torch.tensor([100.0, 1000.0, 10.0, 60.0])
     # total iteration for gradients optimization
-    total_itr = 100
+    total_itr = 150
 
     # ground truth bezier length from P0 to P1
     curve_length_gt = 0.1906
@@ -806,14 +962,18 @@ if __name__ == '__main__':
 
     # check if the order of centerline is right
     # already checked
-    BzrCURVE.drawlineandpts()
+    # BzrCURVE.drawlineandpts()
 
+    # do optimization for minimizing 2d loss
+    BzrCURVE.getOptimize_2d(None, P0_gt)
 
-    # do optimization
-    BzrCURVE.getOptimize(None, P0_gt)
+    # do optimization for minimizing shifted tip loss
+    BzrCURVE.getOptimize_3d(None, P0_gt)
 
     # plot the final results
     BzrCURVE.plotProjCenterline()
+
+    BzrCURVE.plotscalecenterline()
 
     # combine the result to video
     BzrCURVE.Combine2Gif()
